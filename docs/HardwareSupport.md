@@ -37,6 +37,7 @@ A few remarks / reminders:
 | ARMv8 Cortex-A57 (NEON)              | `cortex-a57`           | `sd`   |            |
 | ARMv8.1 ThunderX2 (NEON)             | `thunderx2`            | `sd`   |            |
 | ARMv8.1 A64FX (SVE)                  | `a64fx`                |  `d`   |            |
+| Apple M4/M5 (SME2)                   | `applesme`             | `sd`   |            |
 | IBM Blue Gene/Q (QPX int)            | `bgq`                  |  `d`   |            |
 | IBM Power7 (QPX int)                 | `power7`               |  `d`   |            |
 | IBM Power9                           | `power9`               | `sdcz` |            |

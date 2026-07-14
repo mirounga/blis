@@ -1825,6 +1825,7 @@ check_compiler()
 	# nvc
     if [[ ${cc_vendor} = NVIDIA ]]; then
         blacklistcc_add "knl"
+        blacklistcc_add "applesme"
     fi
 
     # gcc
@@ -1859,6 +1860,10 @@ check_compiler()
 		fi
 		if [[ ${cc_major} -lt 10 ]]; then
 			blacklistcc_add "armsve"
+		fi
+		if [[ ${cc_major} -lt 14 ]]; then
+			# SME2 intrinsics (arm_sme.h) require gcc 14+.
+			blacklistcc_add "applesme"
 		fi
 	fi
 
@@ -1900,6 +1905,10 @@ check_compiler()
 				blacklistcc_add "knl"
 				blacklistcc_add "skx"
 			fi
+			if [[ ${cc_major} -lt 17 ]]; then
+				# SME2 intrinsics/codegen require Apple clang 17+ (Xcode 16.3).
+				blacklistcc_add "applesme"
+			fi
 		else
 			if [[ ${cc_major} -lt 3 ]]; then
 				echoerr_unsupportedcc
@@ -1924,6 +1933,10 @@ check_compiler()
 			fi
 			if [[ ${cc_major} -lt 11 ]]; then
 				blacklistcc_add "armsve"
+			fi
+			if [[ ${cc_major} -lt 18 ]]; then
+				# SME2 intrinsics (arm_sme.h) require clang 18+.
+				blacklistcc_add "applesme"
 			fi
 			if [[ ${cc_major} -ge 19 ]]; then
 				blacklistcc_add "knl"

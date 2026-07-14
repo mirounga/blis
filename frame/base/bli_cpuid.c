@@ -1079,7 +1079,22 @@ et al
 
 #ifdef __APPLE__
 #include <sys/types.h>
-// #include <sys/sysctl.h>
+// NOTE: sysctlbyname() is declared directly instead of via <sys/sysctl.h>
+// because that header does not compile in the strict-ANSI modes (-std=c99)
+// used both by the BLIS build and by configure's auto-detection driver.
+extern int sysctlbyname( const char* name, void* oldp, size_t* oldlenp,
+                         const void* newp, size_t newlen );
+
+// Query an hw.optional.* boolean from the macOS kernel.
+static bool bli_apple_hw_optional( const char* name )
+{
+	int64_t val = 0;
+	size_t  size = sizeof( val );
+
+	if ( sysctlbyname( name, &val, &size, NULL, 0 ) != 0 ) return FALSE;
+
+	return val != 0;
+}
 #endif
 
 static uint32_t get_coretype
@@ -1123,6 +1138,15 @@ static uint32_t get_coretype
 	// FIXME: compute actual part number
 	implementer = 0x61; //Apple
 	part        = 0x023; //Firestorm
+
+	// Apple cores have no non-streaming SVE, so FEATURE_SVE is left unset.
+	// SME/SME2 (M4 and later) are reported via hw.optional.arm.
+	if ( bli_apple_hw_optional( "hw.optional.arm.FEAT_SME" ) )
+		*features |= FEATURE_SME;
+	if ( bli_apple_hw_optional( "hw.optional.arm.FEAT_SME2" ) )
+		*features |= FEATURE_SME2;
+	if ( bli_apple_hw_optional( "hw.optional.arm.FEAT_SME_F64F64" ) )
+		*features |= FEATURE_SME_F64F64;
 #endif //__APPLE__
 
 	// From Linux arch/arm64/include/asm/cputype.h
@@ -1243,10 +1267,18 @@ static uint32_t get_coretype
 #endif
 			}
 			break;
+		case ARM_CPU_IMP_APPLE:
+#ifdef BLIS_CONFIG_APPLESME
+			// Prefer the SME2 subconfig on Apple parts that support it
+			// (M4 and later).
+			if ( *features & FEATURE_SME2 )
+				return BLIS_ARCH_APPLESME;
+#endif
 #ifdef BLIS_CONFIG_FIRESTORM
-		case ARM_CPU_IMP_APPLE:		// assume FIRESTORM good for all
+			// assume FIRESTORM good for all others
 			return BLIS_ARCH_FIRESTORM;
 #endif
+			break;
 	}
 
 #ifdef BLIS_CONFIG_ARMSVE

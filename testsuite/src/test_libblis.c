@@ -85,6 +85,32 @@ int main( int argc, char** argv )
 	// Read the operations parameter file.
 	libblis_test_read_ops_file( libblis_test_operations_filename, &ops );
 
+	// Optional hardware-arch gate. When BLIS_TEST_REQUIRE_ARCH names a
+	// sub-configuration, the *active* sub-configuration must match it, otherwise
+	// we abort before running any operation. This prevents a silent dispatch
+	// fallback (e.g. to 'firestorm') from producing PASS results that never
+	// exercised the intended kernels (e.g. 'applesme'). See output.testsuite for
+	// the failure mode. The gate is a no-op when the env var is unset.
+	{
+		const char* req_arch = getenv( "BLIS_TEST_REQUIRE_ARCH" );
+
+		if ( req_arch != NULL && *req_arch != '\0' )
+		{
+			const arch_t      got_id  = bli_arch_query_id();
+			const char* const got_str = bli_arch_string( got_id );
+
+			if ( strcmp( req_arch, got_str ) != 0 )
+			{
+				fprintf( stderr,
+				         "%s: FATAL: BLIS_TEST_REQUIRE_ARCH='%s' but the active "
+				         "sub-configuration is '%s'. Refusing to run so that a "
+				         "dispatch fallback is not mistaken for a passing test.\n",
+				         libblis_test_binary_name, req_arch, got_str );
+				return 1;
+			}
+		}
+	}
+
 	// Walk through all test modules.
 	libblis_test_thread_decorator( &params, &ops );
 

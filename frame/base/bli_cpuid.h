@@ -182,8 +182,11 @@ enum
 };
 enum
 {
-	FEATURE_NEON = 0x01,
-	FEATURE_SVE  = 0x02
+	FEATURE_NEON       = 0x01,
+	FEATURE_SVE        = 0x02,
+	FEATURE_SME        = 0x04,
+	FEATURE_SME2       = 0x08,
+	FEATURE_SME_F64F64 = 0x10
 };
 
 #endif
