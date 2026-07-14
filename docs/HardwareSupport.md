@@ -37,12 +37,16 @@ A few remarks / reminders:
 | ARMv8 Cortex-A57 (NEON)              | `cortex-a57`           | `sd`   |            |
 | ARMv8.1 ThunderX2 (NEON)             | `thunderx2`            | `sd`   |            |
 | ARMv8.1 A64FX (SVE)                  | `a64fx`                |  `d`   |            |
-| Apple M4/M5 (SME2)                   | `applesme`             | `sd`   |            |
+| Apple M4/M5 (SME2)                   | `applesme`             | `sd`¹  |            |
 | IBM Blue Gene/Q (QPX int)            | `bgq`                  |  `d`   |            |
 | IBM Power7 (QPX int)                 | `power7`               |  `d`   |            |
 | IBM Power9                           | `power9`               | `sdcz` |            |
 | IBM Power10                          | `power10`              | `sdcz` |            |
 | template (C99)                       | `template`             | `sdcz` | `sdcz`     |
+
+¹ For `applesme`, double-precision (`d`) `gemm` is registered only when the CPU
+reports `FEAT_SME_F64F64` at runtime; otherwise double-precision falls back to
+the reference kernel. All Apple M5 parts provide this feature.
 
 ## Level-1f kernels
 

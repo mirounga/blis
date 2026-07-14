@@ -87,8 +87,8 @@ static void bli_dgemm_armsme_2vlx4vl_body
 	const svbool_t  pall = svptrue_b64();
 	const svcount_t pc   = svptrue_c64();
 
-	svzero_za();
-
+	// ZA is already zero on entry: __arm_new("za") zero-initializes the tile
+	// state per the Arm ACLE, so no explicit svzero_za() is needed here.
 	dim_t l = 0;
 
 	// Main loop: 2 k-iterations per pass; A is one 4-vector load, B is two.
@@ -188,6 +188,43 @@ static void bli_dgemm_armsme_2vlx4vl_body
 	}
 }
 
+// Slow path: general row stride (rs_c != 1). The streaming body requires unit
+// row stride, so route C through a temporary microtile. Kept in a separate
+// noinline function so its 16 KiB _ct buffer (and the accompanying stack probe)
+// never lands in the fast-path frame below.
+__attribute__((noinline))
+static void bli_dgemm_armsme_2vlx4vl_ct
+     (
+             dim_t   m,
+             dim_t   n,
+             dim_t   k,
+       const void*   alpha,
+       const void*   a,
+       const void*   b,
+       const void*   beta,
+             void*   c, inc_t rs_c, inc_t cs_c
+     )
+{
+	const dim_t mr = 2 * ( dim_t )svcntsd();
+	const dim_t nr = 2 * mr;
+
+	GEMM_UKR_SETUP_CT_PRE( d, mr, nr, false, 1 );
+	const bool _use_ct = true; // this helper is only reached when rs_c != 1
+	GEMM_UKR_SETUP_CT_POST( d );
+
+	bli_dgemm_armsme_2vlx4vl_body
+	(
+	  m, n, k,
+	  ( const double* )alpha,
+	  ( const double* )a,
+	  ( const double* )b,
+	  ( const double* )beta,
+	  ( double* )c, cs_c
+	);
+
+	GEMM_UKR_FLUSH_CT( d );
+}
+
 void bli_dgemm_armsme_2vlx4vl
      (
              dim_t      m,
@@ -202,27 +239,24 @@ void bli_dgemm_armsme_2vlx4vl
        const cntx_t*    cntx
      )
 {
-	const dim_t mr = 2 * ( dim_t )svcntsd();
-	const dim_t nr = 2 * mr;
+	// Fast path: unit row stride (column-major C). The streaming body handles
+	// m/n edges with predicates and any cs_c, so call it directly with no
+	// temporary microtile, keeping this frame tiny.
+	if ( rs_c == 1 )
+	{
+		bli_dgemm_armsme_2vlx4vl_body
+		(
+		  m, n, k,
+		  ( const double* )alpha,
+		  ( const double* )a,
+		  ( const double* )b,
+		  ( const double* )beta,
+		  ( double* )c, cs_c
+		);
+		return;
+	}
 
-	// The streaming body handles m/n edges with predicates and any cs_c,
-	// but requires unit row stride; use a temporary microtile only when
-	// rs_c != 1.
-	GEMM_UKR_SETUP_CT_PRE( d, mr, nr, false, 1 );
-	const bool _use_ct = ( rs_c != 1 );
-	GEMM_UKR_SETUP_CT_POST( d );
-
-	bli_dgemm_armsme_2vlx4vl_body
-	(
-	  m, n, k,
-	  ( const double* )alpha,
-	  ( const double* )a,
-	  ( const double* )b,
-	  ( const double* )beta,
-	  ( double* )c, cs_c
-	);
-
-	GEMM_UKR_FLUSH_CT( d );
+	bli_dgemm_armsme_2vlx4vl_ct( m, n, k, alpha, a, b, beta, c, rs_c, cs_c );
 }
 
 #endif // __ARM_FEATURE_SME_F64F64 || __ARM_FEATURE_SME2
