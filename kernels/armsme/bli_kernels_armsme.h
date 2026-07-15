@@ -36,8 +36,10 @@
 dim_t bli_armsme_svlw( void ); // # of f32 elements per streaming vector
 dim_t bli_armsme_svld( void ); // # of f64 elements per streaming vector
 
-GEMM_UKR_PROT( float,  s, gemm_armsme_2vlx2vl )
-GEMM_UKR_PROT( double, d, gemm_armsme_2vlx4vl )
+GEMM_UKR_PROT( float,    s, gemm_armsme_2vlx2vl )
+GEMM_UKR_PROT( double,   d, gemm_armsme_2vlx4vl )
+GEMM_UKR_PROT( scomplex, c, gemm_armsme_2vlx1vl )
+GEMM_UKR_PROT( dcomplex, z, gemm_armsme_2vlx2vl )
 
-PACKM_KER_PROT( float,  s, packm_armsme_int_2vlxk )
-PACKM_KER_PROT( double, d, packm_armsme_int_2vlxk )
+PACKM_KER_PROT( float,    s, packm_armsme_int_2vlxk )
+PACKM_KER_PROT( double,   d, packm_armsme_int_2vlxk )

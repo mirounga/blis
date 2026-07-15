@@ -67,6 +67,14 @@ void bli_cntx_init_applesme( cntx_t* cntx )
 	const dim_t n_r_s = 2 * svlw;
 	const dim_t m_r_d = has_f64f64 ? 2 * svld : -1;
 	const dim_t n_r_d = has_f64f64 ? 4 * svld : -1;
+	// Complex register blocksizes (complex elements): cgemm 2VL x 1VL, zgemm
+	// 2VL x 2VL. Each complex sub-tile uses two ZA tiles (real + imaginary),
+	// so cgemm fills the 4 ZA32 tiles (2 sub-tiles) and zgemm the 8 ZA64 tiles
+	// (4 sub-tiles). zgemm requires FEAT_SME_F64F64.
+	const dim_t m_r_c = 2 * svlw;
+	const dim_t n_r_c =     svlw;
+	const dim_t m_r_z = has_f64f64 ? 2 * svld : -1;
+	const dim_t n_r_z = has_f64f64 ? 2 * svld : -1;
 
 	// Update the context with optimized native gemm micro-kernels.
 	bli_cntx_set_ukrs
@@ -75,10 +83,11 @@ void bli_cntx_init_applesme( cntx_t* cntx )
 
 	  // level-3
 	  BLIS_GEMM_UKR, BLIS_FLOAT,    bli_sgemm_armsme_2vlx2vl,
+	  BLIS_GEMM_UKR, BLIS_SCOMPLEX, bli_cgemm_armsme_2vlx1vl,
 
 	  // level-1m
-	  BLIS_PACKM_KER, BLIS_FLOAT,   bli_spackm_armsme_int_2vlxk,
-	  BLIS_PACKM_KER, BLIS_DOUBLE,  bli_dpackm_armsme_int_2vlxk,
+	  BLIS_PACKM_KER, BLIS_FLOAT,    bli_spackm_armsme_int_2vlxk,
+	  BLIS_PACKM_KER, BLIS_DOUBLE,   bli_dpackm_armsme_int_2vlxk,
 
 	  BLIS_VA_END
 	);
@@ -89,9 +98,15 @@ void bli_cntx_init_applesme( cntx_t* cntx )
 		(
 		  cntx,
 		  BLIS_GEMM_UKR, BLIS_DOUBLE,   bli_dgemm_armsme_2vlx4vl,
+		  BLIS_GEMM_UKR, BLIS_DCOMPLEX, bli_zgemm_armsme_2vlx2vl,
 		  BLIS_VA_END
 		);
 	}
+
+	// The complex gemm micro-kernels consume the standard interleaved packed
+	// format (de-interleaving each k-slice in the k-loop), so complex packing
+	// uses the reference/generic packm shared with the other complex level-3
+	// kernels (trsm/trmm); no custom complex packm is registered.
 
 	// Update the context with storage preferences.
 	bli_cntx_set_ukr_prefs
@@ -101,6 +116,8 @@ void bli_cntx_init_applesme( cntx_t* cntx )
 	  // level-3
 	  BLIS_GEMM_UKR_ROW_PREF, BLIS_FLOAT,    FALSE,
 	  BLIS_GEMM_UKR_ROW_PREF, BLIS_DOUBLE,   FALSE,
+	  BLIS_GEMM_UKR_ROW_PREF, BLIS_SCOMPLEX, FALSE,
+	  BLIS_GEMM_UKR_ROW_PREF, BLIS_DCOMPLEX, FALSE,
 
 	  BLIS_VA_END
 	);
@@ -108,11 +125,11 @@ void bli_cntx_init_applesme( cntx_t* cntx )
 	// Initialize level-3 blocksize objects with architecture-specific values.
 	// (-1 keeps the reference value for that datatype.)
 	//                                           s      d      c      z
-	bli_blksz_init_easy( &blkszs[ BLIS_MR ], m_r_s, m_r_d,    -1,    -1 );
-	bli_blksz_init_easy( &blkszs[ BLIS_NR ], n_r_s, n_r_d,    -1,    -1 );
-	bli_blksz_init_easy( &blkszs[ BLIS_MC ],  512, has_f64f64 ?  512 : -1, -1, -1 );
-	bli_blksz_init_easy( &blkszs[ BLIS_KC ],  2048, has_f64f64 ? 2048 : -1, -1, -1 );
-	bli_blksz_init_easy( &blkszs[ BLIS_NC ],  4096, has_f64f64 ? 2048 : -1, -1, -1 );
+	bli_blksz_init_easy( &blkszs[ BLIS_MR ], m_r_s, m_r_d, m_r_c, m_r_z );
+	bli_blksz_init_easy( &blkszs[ BLIS_NR ], n_r_s, n_r_d, n_r_c, n_r_z );
+	bli_blksz_init_easy( &blkszs[ BLIS_MC ],  512, has_f64f64 ?  512 : -1,  256, has_f64f64 ?  256 : -1 );
+	bli_blksz_init_easy( &blkszs[ BLIS_KC ],  2048, has_f64f64 ? 2048 : -1, 1024, has_f64f64 ? 1024 : -1 );
+	bli_blksz_init_easy( &blkszs[ BLIS_NC ],  4096, has_f64f64 ? 2048 : -1, 4096, has_f64f64 ? 2048 : -1 );
 
 	// Update the context with the current architecture's register and cache
 	// blocksizes (and multiples) for native execution.
