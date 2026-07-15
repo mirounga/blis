@@ -88,6 +88,7 @@ void bli_cntx_init_applesme( cntx_t* cntx )
 	  // level-1m
 	  BLIS_PACKM_KER, BLIS_FLOAT,    bli_spackm_armsme_int_2vlxk,
 	  BLIS_PACKM_KER, BLIS_DOUBLE,   bli_dpackm_armsme_int_2vlxk,
+	  BLIS_PACKM_KER, BLIS_SCOMPLEX, bli_cpackm_armsme_int_2vlxk,
 
 	  BLIS_VA_END
 	);
@@ -97,16 +98,17 @@ void bli_cntx_init_applesme( cntx_t* cntx )
 		bli_cntx_set_ukrs
 		(
 		  cntx,
-		  BLIS_GEMM_UKR, BLIS_DOUBLE,   bli_dgemm_armsme_2vlx4vl,
-		  BLIS_GEMM_UKR, BLIS_DCOMPLEX, bli_zgemm_armsme_2vlx2vl,
+		  BLIS_GEMM_UKR,  BLIS_DOUBLE,   bli_dgemm_armsme_2vlx4vl,
+		  BLIS_GEMM_UKR,  BLIS_DCOMPLEX, bli_zgemm_armsme_2vlx2vl,
+		  BLIS_PACKM_KER, BLIS_DCOMPLEX, bli_zpackm_armsme_int_2vlxk,
 		  BLIS_VA_END
 		);
 	}
 
-	// The complex gemm micro-kernels consume the standard interleaved packed
-	// format (de-interleaving each k-slice in the k-loop), so complex packing
-	// uses the reference/generic packm shared with the other complex level-3
-	// kernels (trsm/trmm); no custom complex packm is registered.
+	// The complex packers produce the STANDARD interleaved packed format (the
+	// same one the reference packm and complex trsm/trmm/gemmtrsm consume), so
+	// registering them is safe; they simply vectorize the contiguous and
+	// transpose cases the reference packed scalar-ish.
 
 	// Update the context with storage preferences.
 	bli_cntx_set_ukr_prefs

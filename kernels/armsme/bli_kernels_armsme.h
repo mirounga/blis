@@ -43,3 +43,5 @@ GEMM_UKR_PROT( dcomplex, z, gemm_armsme_2vlx2vl )
 
 PACKM_KER_PROT( float,    s, packm_armsme_int_2vlxk )
 PACKM_KER_PROT( double,   d, packm_armsme_int_2vlxk )
+PACKM_KER_PROT( scomplex, c, packm_armsme_int_2vlxk )
+PACKM_KER_PROT( dcomplex, z, packm_armsme_int_2vlxk )
