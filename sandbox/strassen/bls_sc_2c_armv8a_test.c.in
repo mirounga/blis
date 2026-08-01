@@ -1,0 +1,299 @@
+/*
+ * Standalone focused test for bls_sc_2c_armv8a.c.
+ *
+ * This file deliberately uses the .c.in suffix so the sandbox build does
+ * not place a main() function in libblis. Example:
+ *
+ *   cc -x c ... bls_sc_2c_armv8a_test.c.in bls_sc_2c_armv8a.o \
+ *      libblis.a -lm -lpthread -o test_2c
+ */
+
+#include "blis.h"
+#include "bls_sc_2c_armv8a.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static float sf( size_t i )
+{
+	return ( float )( ( int )( i * 37 % 101 ) - 50 ) / 37.0f;
+}
+
+static double df( size_t i )
+{
+	return ( double )( ( int )( i * 53 % 127 ) - 63 ) / 43.0;
+}
+
+static int test_s( dim_t k, float alpha, float beta0, float beta1, int rel )
+{
+	const dim_t mr = 12, nr = 8;
+	const inc_t rs0 = 13, rs1 = 17;
+	const size_t kp = k > 0 ? ( size_t )k : 1;
+	float* a  = malloc( kp * mr * sizeof *a );
+	float* b  = malloc( kp * nr * sizeof *b );
+	float* c0 = malloc( ( size_t )mr * rs0 * sizeof *c0 );
+	float* c1 = malloc( ( size_t )mr * rs1 * sizeof *c1 );
+	float* r0 = malloc( ( size_t )mr * rs0 * sizeof *r0 );
+	float* r1 = malloc( ( size_t )mr * rs1 * sizeof *r1 );
+	if ( a == NULL || b == NULL || c0 == NULL || c1 == NULL ||
+	     r0 == NULL || r1 == NULL ) return 1;
+
+	for ( size_t i = 0; i < ( size_t )k * mr; ++i ) a[i] = sf( i + 3 );
+	for ( size_t i = 0; i < ( size_t )k * nr; ++i ) b[i] = sf( i + 29 );
+	for ( size_t i = 0; i < ( size_t )mr * rs0; ++i ) c0[i] = sf( i + 71 );
+	for ( size_t i = 0; i < ( size_t )mr * rs1; ++i ) c1[i] = sf( i + 113 );
+	memcpy( r0, c0, ( size_t )mr * rs0 * sizeof *r0 );
+	memcpy( r1, c1, ( size_t )mr * rs1 * sizeof *r1 );
+
+	for ( dim_t i = 0; i < mr; ++i )
+	for ( dim_t j = 0; j < nr; ++j )
+	{
+		float rho = 0.0f;
+		for ( dim_t p = 0; p < k; ++p )
+			rho += a[p * mr + i] * b[p * nr + j];
+		rho *= alpha;
+		r0[i * rs0 + j] = beta0 * r0[i * rs0 + j] + rho;
+		r1[i * rs1 + j] = beta1 * r1[i * rs1 + j] +
+		                   ( rel > 0 ? rho : -rho );
+	}
+
+	bls_sc_2c_params_t p2 = { c1, &beta1, rs1, rel };
+	auxinfo_t aux = { 0 };
+	bli_auxinfo_set_next_a( a, &aux );
+	bli_auxinfo_set_next_b( b, &aux );
+	bli_auxinfo_set_params( &p2, &aux );
+	bls_sc_sgemm_armv8a_asm_12x8r_2c
+	(
+	  mr, nr, k, &alpha, a, b, &beta0, c0, rs0, 1, &aux, NULL
+	);
+
+	int fail = 0;
+	for ( dim_t i = 0; i < mr; ++i )
+	for ( dim_t j = 0; j < nr; ++j )
+	{
+		const float e0 = fabsf( c0[i * rs0 + j] - r0[i * rs0 + j] );
+		const float e1 = fabsf( c1[i * rs1 + j] - r1[i * rs1 + j] );
+		const float t0 = 3.0e-5f * ( 1.0f + fabsf( r0[i * rs0 + j] ) );
+		const float t1 = 3.0e-5f * ( 1.0f + fabsf( r1[i * rs1 + j] ) );
+		if ( !( e0 <= t0 ) || !( e1 <= t1 ) ) fail = 1;
+	}
+	for ( dim_t i = 0; i < mr; ++i )
+	{
+		for ( dim_t j = nr; j < rs0; ++j )
+			if ( c0[i * rs0 + j] != r0[i * rs0 + j] ) fail = 1;
+		for ( dim_t j = nr; j < rs1; ++j )
+			if ( c1[i * rs1 + j] != r1[i * rs1 + j] ) fail = 1;
+	}
+
+	free( a ); free( b ); free( c0 ); free( c1 ); free( r0 ); free( r1 );
+	return fail;
+}
+
+static int test_d( dim_t k, double alpha, double beta0, double beta1, int rel )
+{
+	const dim_t mr = 8, nr = 6;
+	const inc_t rs0 = 11, rs1 = 13;
+	const size_t kp = k > 0 ? ( size_t )k : 1;
+	double* a  = malloc( kp * mr * sizeof *a );
+	double* b  = malloc( kp * nr * sizeof *b );
+	double* c0 = malloc( ( size_t )mr * rs0 * sizeof *c0 );
+	double* c1 = malloc( ( size_t )mr * rs1 * sizeof *c1 );
+	double* r0 = malloc( ( size_t )mr * rs0 * sizeof *r0 );
+	double* r1 = malloc( ( size_t )mr * rs1 * sizeof *r1 );
+	if ( a == NULL || b == NULL || c0 == NULL || c1 == NULL ||
+	     r0 == NULL || r1 == NULL ) return 1;
+
+	for ( size_t i = 0; i < ( size_t )k * mr; ++i ) a[i] = df( i + 5 );
+	for ( size_t i = 0; i < ( size_t )k * nr; ++i ) b[i] = df( i + 31 );
+	for ( size_t i = 0; i < ( size_t )mr * rs0; ++i ) c0[i] = df( i + 79 );
+	for ( size_t i = 0; i < ( size_t )mr * rs1; ++i ) c1[i] = df( i + 127 );
+	memcpy( r0, c0, ( size_t )mr * rs0 * sizeof *r0 );
+	memcpy( r1, c1, ( size_t )mr * rs1 * sizeof *r1 );
+
+	for ( dim_t i = 0; i < mr; ++i )
+	for ( dim_t j = 0; j < nr; ++j )
+	{
+		double rho = 0.0;
+		for ( dim_t p = 0; p < k; ++p )
+			rho += a[p * mr + i] * b[p * nr + j];
+		rho *= alpha;
+		r0[i * rs0 + j] = beta0 * r0[i * rs0 + j] + rho;
+		r1[i * rs1 + j] = beta1 * r1[i * rs1 + j] +
+		                   ( rel > 0 ? rho : -rho );
+	}
+
+	bls_sc_2c_params_t p2 = { c1, &beta1, rs1, rel };
+	auxinfo_t aux = { 0 };
+	bli_auxinfo_set_next_a( a, &aux );
+	bli_auxinfo_set_next_b( b, &aux );
+	bli_auxinfo_set_params( &p2, &aux );
+	bls_sc_dgemm_armv8a_asm_8x6r_2c
+	(
+	  mr, nr, k, &alpha, a, b, &beta0, c0, rs0, 1, &aux, NULL
+	);
+
+	int fail = 0;
+	for ( dim_t i = 0; i < mr; ++i )
+	for ( dim_t j = 0; j < nr; ++j )
+	{
+		const double e0 = fabs( c0[i * rs0 + j] - r0[i * rs0 + j] );
+		const double e1 = fabs( c1[i * rs1 + j] - r1[i * rs1 + j] );
+		const double t0 = 2.0e-13 * ( 1.0 + fabs( r0[i * rs0 + j] ) );
+		const double t1 = 2.0e-13 * ( 1.0 + fabs( r1[i * rs1 + j] ) );
+		if ( !( e0 <= t0 ) || !( e1 <= t1 ) ) fail = 1;
+	}
+	for ( dim_t i = 0; i < mr; ++i )
+	{
+		for ( dim_t j = nr; j < rs0; ++j )
+			if ( c0[i * rs0 + j] != r0[i * rs0 + j] ) fail = 1;
+		for ( dim_t j = nr; j < rs1; ++j )
+			if ( c1[i * rs1 + j] != r1[i * rs1 + j] ) fail = 1;
+	}
+
+	free( a ); free( b ); free( c0 ); free( c1 ); free( r0 ); free( r1 );
+	return fail;
+}
+
+/*
+ * In a generic build the public symbols below resolve to the portable
+ * correctness backstop. A zero beta must suppress the C read, including when
+ * the old C value is a NaN. The same test also protects the arm64 epilogues
+ * when linked against an optimized build.
+ */
+static int test_zero_beta_nan_s( int rel )
+{
+	enum { mr = 12, nr = 8, k = 5, rs0 = 13, rs1 = 17 };
+	const float alpha = -0.75f;
+	const float beta0 = 0.0f;
+	const float beta1 = 0.0f;
+	float a[k * mr];
+	float b[k * nr];
+	float c0[mr * rs0];
+	float c1[mr * rs1];
+
+	for ( size_t i = 0; i < sizeof a / sizeof *a; ++i ) a[i] = sf( i + 211 );
+	for ( size_t i = 0; i < sizeof b / sizeof *b; ++i ) b[i] = sf( i + 307 );
+	for ( size_t i = 0; i < sizeof c0 / sizeof *c0; ++i ) c0[i] = NAN;
+	for ( size_t i = 0; i < sizeof c1 / sizeof *c1; ++i ) c1[i] = NAN;
+
+	bls_sc_2c_params_t p2 = { c1, &beta1, rs1, rel };
+	auxinfo_t aux = { 0 };
+	bli_auxinfo_set_next_a( a, &aux );
+	bli_auxinfo_set_next_b( b, &aux );
+	bli_auxinfo_set_params( &p2, &aux );
+	bls_sc_sgemm_armv8a_asm_12x8r_2c
+	(
+	  mr, nr, k, &alpha, a, b, &beta0, c0, rs0, 1, &aux, NULL
+	);
+
+	int fail = 0;
+	for ( dim_t i = 0; i < mr; ++i )
+	for ( dim_t j = 0; j < nr; ++j )
+	{
+		float rho = 0.0f;
+		for ( dim_t p = 0; p < k; ++p )
+			rho += a[p * mr + i] * b[p * nr + j];
+		rho *= alpha;
+		const float expected1 = rel > 0 ? rho : -rho;
+		const float t = 3.0e-5f * ( 1.0f + fabsf( rho ) );
+		if ( !isfinite( c0[i * rs0 + j] ) ||
+		     !isfinite( c1[i * rs1 + j] ) ||
+		     fabsf( c0[i * rs0 + j] - rho ) > t ||
+		     fabsf( c1[i * rs1 + j] - expected1 ) > t )
+			fail = 1;
+	}
+	for ( dim_t i = 0; i < mr; ++i )
+	{
+		for ( dim_t j = nr; j < rs0; ++j )
+			if ( !isnan( c0[i * rs0 + j] ) ) fail = 1;
+		for ( dim_t j = nr; j < rs1; ++j )
+			if ( !isnan( c1[i * rs1 + j] ) ) fail = 1;
+	}
+
+	return fail;
+}
+
+static int test_zero_beta_nan_d( int rel )
+{
+	enum { mr = 8, nr = 6, k = 5, rs0 = 11, rs1 = 13 };
+	const double alpha = 0.625;
+	const double beta0 = 0.0;
+	const double beta1 = 0.0;
+	double a[k * mr];
+	double b[k * nr];
+	double c0[mr * rs0];
+	double c1[mr * rs1];
+
+	for ( size_t i = 0; i < sizeof a / sizeof *a; ++i ) a[i] = df( i + 223 );
+	for ( size_t i = 0; i < sizeof b / sizeof *b; ++i ) b[i] = df( i + 331 );
+	for ( size_t i = 0; i < sizeof c0 / sizeof *c0; ++i ) c0[i] = NAN;
+	for ( size_t i = 0; i < sizeof c1 / sizeof *c1; ++i ) c1[i] = NAN;
+
+	bls_sc_2c_params_t p2 = { c1, &beta1, rs1, rel };
+	auxinfo_t aux = { 0 };
+	bli_auxinfo_set_next_a( a, &aux );
+	bli_auxinfo_set_next_b( b, &aux );
+	bli_auxinfo_set_params( &p2, &aux );
+	bls_sc_dgemm_armv8a_asm_8x6r_2c
+	(
+	  mr, nr, k, &alpha, a, b, &beta0, c0, rs0, 1, &aux, NULL
+	);
+
+	int fail = 0;
+	for ( dim_t i = 0; i < mr; ++i )
+	for ( dim_t j = 0; j < nr; ++j )
+	{
+		double rho = 0.0;
+		for ( dim_t p = 0; p < k; ++p )
+			rho += a[p * mr + i] * b[p * nr + j];
+		rho *= alpha;
+		const double expected1 = rel > 0 ? rho : -rho;
+		const double t = 2.0e-13 * ( 1.0 + fabs( rho ) );
+		if ( !isfinite( c0[i * rs0 + j] ) ||
+		     !isfinite( c1[i * rs1 + j] ) ||
+		     fabs( c0[i * rs0 + j] - rho ) > t ||
+		     fabs( c1[i * rs1 + j] - expected1 ) > t )
+			fail = 1;
+	}
+	for ( dim_t i = 0; i < mr; ++i )
+	{
+		for ( dim_t j = nr; j < rs0; ++j )
+			if ( !isnan( c0[i * rs0 + j] ) ) fail = 1;
+		for ( dim_t j = nr; j < rs1; ++j )
+			if ( !isnan( c1[i * rs1 + j] ) ) fail = 1;
+	}
+
+	return fail;
+}
+
+int main( void )
+{
+	const dim_t ks[] = { 0, 1, 2, 3, 4, 5, 7, 16, 31, 257 };
+	const float  sb[][3] = { { 1.0f, 0.0f, 0.0f },
+	                         {-0.75f, 1.0f,-0.5f },
+	                         {-0.50f, 0.75f, 1.0f },
+	                         { 0.25f,-0.25f, 1.25f } };
+	const double db[][3] = { { 1.0, 0.0, 0.0 },
+	                         {-0.75, 1.0,-0.5 },
+	                         {-0.50, 0.75, 1.0 },
+	                         { 0.25,-0.25, 1.25 } };
+	int fail = 0;
+
+	for ( size_t ik = 0; ik < sizeof ks / sizeof *ks; ++ik )
+	for ( size_t ib = 0; ib < sizeof sb / sizeof *sb; ++ib )
+	for ( int rel = -1; rel <= 1; rel += 2 )
+	{
+		fail |= test_s( ks[ik], sb[ib][0], sb[ib][1], sb[ib][2], rel );
+		fail |= test_d( ks[ik], db[ib][0], db[ib][1], db[ib][2], rel );
+	}
+	for ( int rel = -1; rel <= 1; rel += 2 )
+	{
+		fail |= test_zero_beta_nan_s( rel );
+		fail |= test_zero_beta_nan_d( rel );
+	}
+
+	puts( fail ? "two-C armv8a: FAIL" : "two-C armv8a: PASS" );
+	return fail;
+}

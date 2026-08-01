@@ -1,0 +1,474 @@
+/*
+ * Paired SubCuber/conventional benchmark.
+ *
+ * This file uses the .c.in suffix so the sandbox build does not put main()
+ * into libblis. Example from an out-of-tree arm64 build:
+ *
+ *   cc -O3 -Iinclude/arm64 -x c \
+ *      /path/to/blis/sandbox/strassen/bls_subcuber_bench.c.in \
+ *      -x none lib/arm64/libblis.a -lpthread -lm -o bench
+ *   BLIS_NUM_THREADS=8 ./bench s 4096
+ *   BLIS_NUM_THREADS=8 ./bench s 2304 2304 12288
+ *   BLIS_SUBCUBER_BENCH_COMPARE=pair BLIS_NUM_THREADS=8 ./bench s 4096
+ */
+
+#include "blis.h"
+
+#include <errno.h>
+#include <inttypes.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+enum { BLS_SC_BENCH_SAMPLES = 7 };
+
+static bool bls_sc_bench_parse_dim
+     (
+       const char* text,
+             dim_t* value
+     )
+{
+	char* end = NULL;
+	errno = 0;
+	const intmax_t parsed = strtoimax( text, &end, 10 );
+
+	if ( errno == ERANGE || end == text || *end != '\0' || parsed <= 0 )
+		return FALSE;
+
+	const dim_t converted = ( dim_t )parsed;
+	if ( ( intmax_t )converted != parsed ) return FALSE;
+
+	*value = converted;
+	return TRUE;
+}
+
+static int bls_sc_bench_loop_count
+     (
+       double target_seconds,
+       double calibration_seconds
+     )
+{
+	if ( !isfinite( calibration_seconds ) || calibration_seconds <= 0.0 )
+		return 0;
+
+	const double loops = ceil( target_seconds / calibration_seconds );
+	if ( !isfinite( loops ) || loops >= 200.0 ) return 200;
+	if ( loops <= 1.0 ) return 1;
+
+	return ( int )loops;
+}
+
+static int bls_sc_bench_cmp_double( const void* a, const void* b )
+{
+	const double x = *( const double* )a;
+	const double y = *( const double* )b;
+	return ( x > y ) - ( x < y );
+}
+
+static double bls_sc_bench_median
+     (
+       const double values[BLS_SC_BENCH_SAMPLES]
+     )
+{
+	double sorted[BLS_SC_BENCH_SAMPLES];
+	for ( int i = 0; i < BLS_SC_BENCH_SAMPLES; ++i )
+		sorted[i] = values[i];
+
+	qsort
+	(
+	  sorted, BLS_SC_BENCH_SAMPLES, sizeof( double ),
+	  bls_sc_bench_cmp_double
+	);
+	return sorted[BLS_SC_BENCH_SAMPLES / 2];
+}
+
+static void bls_sc_bench_set_or_unset
+     (
+       const char* name,
+       const char* value
+     )
+{
+	if ( value != NULL && value[0] != '\0' ) setenv( name, value, 1 );
+	else                                      unsetenv( name );
+}
+
+static void bls_sc_bench_configure
+     (
+             bool  alternate,
+       const char* compare
+     )
+{
+	unsetenv( "BLIS_SUBCUBER_DISABLE" );
+	unsetenv( "BLIS_SUBCUBER_EXPERIMENT_TERM_TRAIL" );
+	unsetenv( "BLIS_SUBCUBER_EXPERIMENT_PAIR_BATCH" );
+	unsetenv( "BLIS_SUBCUBER_EXPERIMENT_PAIR_FUSED_PACK" );
+	unsetenv( "BLIS_SUBCUBER_DISABLE_SIMD_PACK" );
+	unsetenv( "BLIS_SUBCUBER_DISABLE_PAIR_FUSED_PACK" );
+
+	if ( strcmp( compare, "baseline" ) == 0 )
+	{
+		if ( !alternate ) setenv( "BLIS_SUBCUBER_DISABLE", "1", 1 );
+		else
+		{
+			const char* mode = getenv( "BLIS_SUBCUBER_BENCH_ALT_MODE" );
+			if ( mode != NULL && strcmp( mode, "trail" ) == 0 )
+				setenv( "BLIS_SUBCUBER_EXPERIMENT_TERM_TRAIL", "1", 1 );
+			if ( mode != NULL && strcmp( mode, "pair" ) == 0 )
+			{
+				setenv( "BLIS_SUBCUBER_EXPERIMENT_PAIR_BATCH", "1", 1 );
+				setenv( "BLIS_SUBCUBER_DISABLE_PAIR_FUSED_PACK", "1", 1 );
+			}
+			if ( mode != NULL && strcmp( mode, "scalar" ) == 0 )
+				setenv( "BLIS_SUBCUBER_DISABLE_SIMD_PACK", "1", 1 );
+			if ( mode != NULL && strcmp( mode, "combined" ) == 0 )
+				setenv( "BLIS_SUBCUBER_EXPERIMENT_PAIR_BATCH", "1", 1 );
+		}
+	}
+	else if ( strcmp( compare, "trail" ) == 0 )
+	{
+		if ( alternate )
+			setenv( "BLIS_SUBCUBER_EXPERIMENT_TERM_TRAIL", "1", 1 );
+	}
+	else if ( strcmp( compare, "pair" ) == 0 )
+	{
+		setenv( "BLIS_SUBCUBER_DISABLE_PAIR_FUSED_PACK", "1", 1 );
+		if ( alternate )
+			setenv( "BLIS_SUBCUBER_EXPERIMENT_PAIR_BATCH", "1", 1 );
+	}
+	else if ( strcmp( compare, "simd" ) == 0 )
+	{
+		if ( !alternate )
+			setenv( "BLIS_SUBCUBER_DISABLE_SIMD_PACK", "1", 1 );
+	}
+	else if ( strcmp( compare, "pair-fused" ) == 0 )
+	{
+		setenv( "BLIS_SUBCUBER_EXPERIMENT_PAIR_BATCH", "1", 1 );
+		setenv( "BLIS_SUBCUBER_DISABLE_SIMD_PACK", "1", 1 );
+		setenv( "BLIS_SUBCUBER_DISABLE_PAIR_FUSED_PACK", "1", 1 );
+		if ( alternate )
+			setenv
+			(
+			  "BLIS_SUBCUBER_EXPERIMENT_PAIR_FUSED_PACK", "1", 1
+			);
+	}
+	else if ( strcmp( compare, "pair-fused-simd" ) == 0 )
+	{
+		setenv( "BLIS_SUBCUBER_EXPERIMENT_PAIR_BATCH", "1", 1 );
+		if ( !alternate )
+			setenv( "BLIS_SUBCUBER_DISABLE_SIMD_PACK", "1", 1 );
+	}
+	else if ( strcmp( compare, "pair-fusion" ) == 0 )
+	{
+		setenv( "BLIS_SUBCUBER_EXPERIMENT_PAIR_BATCH", "1", 1 );
+		if ( !alternate )
+			setenv( "BLIS_SUBCUBER_DISABLE_PAIR_FUSED_PACK", "1", 1 );
+	}
+	else if ( strcmp( compare, "combined" ) == 0 )
+	{
+		if ( alternate )
+			setenv( "BLIS_SUBCUBER_EXPERIMENT_PAIR_BATCH", "1", 1 );
+		else
+			setenv( "BLIS_SUBCUBER_DISABLE_SIMD_PACK", "1", 1 );
+	}
+	else
+	{
+		bls_sc_bench_set_or_unset
+		(
+		  "BLIS_SUBCUBER_NC",
+		  getenv
+		  (
+		    alternate
+		      ? "BLIS_SUBCUBER_BENCH_ALT_NC"
+		      : "BLIS_SUBCUBER_BENCH_BASE_NC"
+		  )
+		);
+		bls_sc_bench_set_or_unset
+		(
+		  "BLIS_SUBCUBER_KC",
+		  getenv
+		  (
+		    alternate
+		      ? "BLIS_SUBCUBER_BENCH_ALT_KC"
+		      : "BLIS_SUBCUBER_BENCH_BASE_KC"
+		  )
+		);
+	}
+
+	const char* scalar_pack = getenv( "BLIS_SUBCUBER_BENCH_SCALAR_PACK" );
+	if ( scalar_pack != NULL && scalar_pack[0] != '\0' &&
+	     scalar_pack[0] != '0' )
+		setenv( "BLIS_SUBCUBER_DISABLE_SIMD_PACK", "1", 1 );
+}
+
+static double bls_sc_bench_call
+     (
+       const obj_t* alpha,
+       const obj_t* a,
+       const obj_t* b,
+       const obj_t* beta,
+             obj_t* c,
+             bool   alternate,
+       const char*  compare
+     )
+{
+	bls_sc_bench_configure( alternate, compare );
+
+	const double start = bli_clock();
+	bli_gemm( alpha, a, b, beta, c );
+	return bli_clock() - start;
+}
+
+static bool bls_sc_bench_results_close
+     (
+             num_t   dt,
+             dim_t   m,
+             dim_t   n,
+       const obj_t*  reference,
+       const obj_t*  candidate,
+             double* relative_error
+     )
+{
+	const inc_t rs_r = bli_obj_row_stride( reference );
+	const inc_t cs_r = bli_obj_col_stride( reference );
+	const inc_t rs_c = bli_obj_row_stride( candidate );
+	const inc_t cs_c = bli_obj_col_stride( candidate );
+	long double ref_sq = 0.0L;
+	long double diff_sq = 0.0L;
+	*relative_error = INFINITY;
+
+	if ( dt == BLIS_FLOAT )
+	{
+		const float* r = bli_obj_buffer_at_off( reference );
+		const float* c = bli_obj_buffer_at_off( candidate );
+
+		for ( dim_t j = 0; j < n; ++j )
+		for ( dim_t i = 0; i < m; ++i )
+		{
+			const float rv = r[i * rs_r + j * cs_r];
+			const float cv = c[i * rs_c + j * cs_c];
+			if ( !isfinite( rv ) || !isfinite( cv ) ) return FALSE;
+			const long double d = ( long double )cv - ( long double )rv;
+			ref_sq += ( long double )rv * ( long double )rv;
+			diff_sq += d * d;
+		}
+	}
+	else
+	{
+		const double* r = bli_obj_buffer_at_off( reference );
+		const double* c = bli_obj_buffer_at_off( candidate );
+
+		for ( dim_t j = 0; j < n; ++j )
+		for ( dim_t i = 0; i < m; ++i )
+		{
+			const double rv = r[i * rs_r + j * cs_r];
+			const double cv = c[i * rs_c + j * cs_c];
+			if ( !isfinite( rv ) || !isfinite( cv ) ) return FALSE;
+			const long double d = ( long double )cv - ( long double )rv;
+			ref_sq += ( long double )rv * ( long double )rv;
+			diff_sq += d * d;
+		}
+	}
+
+	const long double scale = ref_sq > 1.0L ? sqrtl( ref_sq ) : 1.0L;
+	*relative_error = ( double )( sqrtl( diff_sq ) / scale );
+	return *relative_error <= ( dt == BLIS_FLOAT ? 5.0e-4 : 1.0e-11 );
+}
+
+int main( int argc, char** argv )
+{
+	if ( argc != 3 && argc != 5 )
+	{
+		fprintf( stderr, "usage: %s s|d n | s|d m n k\n", argv[0] );
+		return 2;
+	}
+
+	if ( strcmp( argv[1], "s" ) != 0 && strcmp( argv[1], "d" ) != 0 )
+	{
+		fprintf( stderr, "usage: %s s|d n | s|d m n k\n", argv[0] );
+		return 2;
+	}
+
+	const num_t dt = strcmp( argv[1], "s" ) == 0 ? BLIS_FLOAT : BLIS_DOUBLE;
+	dim_t m, n, k;
+	if ( !bls_sc_bench_parse_dim( argv[2], &m ) ||
+	     ( argc == 5 &&
+	       ( !bls_sc_bench_parse_dim( argv[3], &n ) ||
+	         !bls_sc_bench_parse_dim( argv[4], &k ) ) ) )
+	{
+		fprintf( stderr, "matrix dimensions must be positive integers\n" );
+		return 2;
+	}
+	if ( argc == 3 ) n = k = m;
+
+	const char* compare = getenv( "BLIS_SUBCUBER_BENCH_COMPARE" );
+	if ( compare == NULL || compare[0] == '\0' ) compare = "baseline";
+	if ( strcmp( compare, "baseline" ) != 0 &&
+	     strcmp( compare, "trail" ) != 0 &&
+		     strcmp( compare, "pair" ) != 0 &&
+		     strcmp( compare, "simd" ) != 0 &&
+		     strcmp( compare, "pair-fused" ) != 0 &&
+		     strcmp( compare, "pair-fused-simd" ) != 0 &&
+		     strcmp( compare, "pair-fusion" ) != 0 &&
+		     strcmp( compare, "combined" ) != 0 &&
+		     strcmp( compare, "blocks" ) != 0 )
+	{
+		fprintf( stderr, "invalid BLIS_SUBCUBER_BENCH_COMPARE\n" );
+		return 2;
+	}
+
+	obj_t alpha, beta, a, b, c, c_ref;
+	bli_init();
+	bli_obj_scalar_init_detached( dt, &alpha );
+	bli_obj_scalar_init_detached( dt, &beta );
+	bli_setsc( 1.0, 0.0, &alpha );
+	bli_setsc( 0.0, 0.0, &beta );
+	bli_obj_create( dt, m, k, 0, 0, &a );
+	bli_obj_create( dt, k, n, 0, 0, &b );
+	bli_obj_create( dt, m, n, 0, 0, &c );
+	bli_obj_create( dt, m, n, 0, 0, &c_ref );
+	bli_randm( &a );
+	bli_randm( &b );
+	bli_randm( &c );
+	bli_copym( &c, &c_ref );
+
+	/* Build an independent, untimed conventional-BLIS correctness oracle. */
+	bls_sc_bench_configure( FALSE, "baseline" );
+	bli_gemm( &alpha, &a, &b, &beta, &c_ref );
+
+	double relative_error = 0.0;
+	bls_sc_bench_configure( FALSE, compare );
+	bli_gemm( &alpha, &a, &b, &beta, &c );
+	if ( !bls_sc_bench_results_close
+	      ( dt, m, n, &c_ref, &c, &relative_error ) )
+	{
+		fprintf
+		(
+		  stderr,
+		  "benchmark base correctness failure: relative Frobenius error %.3e\n",
+		  relative_error
+		);
+		bli_obj_free( &a );
+		bli_obj_free( &b );
+		bli_obj_free( &c );
+		bli_obj_free( &c_ref );
+		bli_finalize();
+		return 1;
+	}
+
+	bls_sc_bench_configure( TRUE, compare );
+	bli_gemm( &alpha, &a, &b, &beta, &c );
+	if ( !bls_sc_bench_results_close
+	      ( dt, m, n, &c_ref, &c, &relative_error ) )
+	{
+		fprintf
+		(
+		  stderr,
+		  "benchmark alternate correctness failure: relative Frobenius error %.3e\n",
+		  relative_error
+		);
+		bli_obj_free( &a );
+		bli_obj_free( &b );
+		bli_obj_free( &c );
+		bli_obj_free( &c_ref );
+		bli_finalize();
+		return 1;
+	}
+
+	( void )bls_sc_bench_call
+	( &alpha, &a, &b, &beta, &c, FALSE, compare );
+	( void )bls_sc_bench_call
+	( &alpha, &a, &b, &beta, &c, TRUE, compare );
+
+	const double base_cal =
+	    bls_sc_bench_call
+	    ( &alpha, &a, &b, &beta, &c, FALSE, compare );
+	const double sc_cal =
+	    bls_sc_bench_call
+	    ( &alpha, &a, &b, &beta, &c, TRUE, compare );
+	const double target_seconds = 0.25;
+	const int base_loops =
+	    bls_sc_bench_loop_count( target_seconds, base_cal );
+	const int sc_loops =
+	    bls_sc_bench_loop_count( target_seconds, sc_cal );
+	if ( base_loops == 0 || sc_loops == 0 )
+	{
+		fprintf
+		(
+		  stderr,
+		  "invalid benchmark calibration: base=%.9g alternate=%.9g\n",
+		  base_cal, sc_cal
+		);
+		bli_obj_free( &a );
+		bli_obj_free( &b );
+		bli_obj_free( &c );
+		bli_obj_free( &c_ref );
+		bli_finalize();
+		return 1;
+	}
+
+	double base[BLS_SC_BENCH_SAMPLES];
+	double sc[BLS_SC_BENCH_SAMPLES];
+
+	for ( int sample = 0; sample < BLS_SC_BENCH_SAMPLES; ++sample )
+	{
+		const bool sc_first = sample & 1;
+		for ( int order = 0; order < 2; ++order )
+		{
+			const bool use_sc = order == 0 ? sc_first : !sc_first;
+			const int loops = use_sc ? sc_loops : base_loops;
+			double elapsed = 0.0;
+			for ( int iteration = 0; iteration < loops; ++iteration )
+				elapsed += bls_sc_bench_call
+				(
+				  &alpha, &a, &b, &beta, &c, use_sc, compare
+				);
+
+			if ( use_sc ) sc[sample] = elapsed / loops;
+			else          base[sample] = elapsed / loops;
+		}
+	}
+
+	const double base_median = bls_sc_bench_median( base );
+	const double sc_median = bls_sc_bench_median( sc );
+	const double flops =
+	    2.0 * ( double )m * ( double )n * ( double )k;
+	const dim_t nt = bli_thread_get_num_threads();
+	char label[96];
+	if ( strcmp( compare, "baseline" ) == 0 )
+	{
+		const char* mode = getenv( "BLIS_SUBCUBER_BENCH_ALT_MODE" );
+		snprintf
+		(
+		  label, sizeof label, "baseline:%s",
+		  mode != NULL && mode[0] != '\0' ? mode : "default"
+		);
+	}
+	else
+		snprintf( label, sizeof label, "%s", compare );
+
+	printf
+	(
+	  "%s,%c,%lld,%lld,%lld,%lld,%d,%d,%.9f,%.9f,%.3f,%.3f,%.3f\n",
+	  label,
+	  dt == BLIS_FLOAT ? 's' : 'd',
+	  ( long long )m,
+	  ( long long )n,
+	  ( long long )k,
+	  ( long long )nt,
+	  base_loops,
+	  sc_loops,
+	  base_median,
+	  sc_median,
+	  flops / base_median / 1.0e9,
+	  flops / sc_median / 1.0e9,
+	  100.0 * ( sc_median / base_median - 1.0 )
+	);
+
+	bli_obj_free( &a );
+	bli_obj_free( &b );
+	bli_obj_free( &c );
+	bli_obj_free( &c_ref );
+	bli_finalize();
+	return 0;
+}

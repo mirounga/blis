@@ -1,0 +1,898 @@
+/*
+ * Standalone focused test for bls_sc_packm_armv8a.c.
+ *
+ * This file deliberately uses the .c.in suffix so the sandbox build does
+ * not place a main() function in libblis. Example:
+ *
+ *   cc -O2 -I/path/to/build/include/arm64 \
+ *      -I/path/to/blis/sandbox/strassen -x c \
+ *      /path/to/blis/sandbox/strassen/bls_sc_packm_armv8a_test.c.in \
+ *      /path/to/blis/sandbox/strassen/bls_sc_packm_armv8a.c \
+ *      /path/to/build/lib/arm64/libblis.a -lm -lpthread -o test_packm
+ */
+
+#include "blis.h"
+#include "bls_sc_packm_armv8a.h"
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+enum { GUARD_ELEMS = 16 };
+
+typedef struct
+{
+	int8_t shared_sign;
+	int8_t unique_sign; /* Zero denotes a NULL unique source (singleton). */
+} pair_form_t;
+
+static float sf( size_t i, unsigned source )
+{
+	if ( i % 29 == 0 ) return 0.0f;
+	if ( i % 31 == 0 ) return source == 0 ? 0.0f : -0.0f;
+	if ( i % 37 == 0 ) return source == 0 ? 1.0f : 0x1p-24f;
+	if ( i % 41 == 0 )
+		return source == 0 ? -0x1.000002p+0f : 0x1.fffffep-1f;
+
+	const int v = ( int )( ( i * 37 + source * 19 ) % 113 ) - 56;
+	return ( float )v * 0.125f;
+}
+
+static double df( size_t i, unsigned source )
+{
+	if ( i % 29 == 0 ) return 0.0;
+	if ( i % 31 == 0 ) return source == 0 ? 0.0 : -0.0;
+	if ( i % 37 == 0 ) return source == 0 ? 1.0 : 0x1p-53;
+	if ( i % 41 == 0 )
+		return source == 0
+		         ? -0x1.0000000000001p+0
+		         :  0x1.fffffffffffffp-1;
+
+	const int v = ( int )( ( i * 53 + source * 23 ) % 127 ) - 63;
+	return ( double )v * 0.125;
+}
+
+static float combine_s( float a, float b, int8_t sign0, int8_t sign1 )
+{
+	if ( sign0 > 0 ) return sign1 > 0 ? a + b : a - b;
+	return sign1 > 0 ? b - a : -a - b;
+}
+
+static double combine_d( double a, double b, int8_t sign0, int8_t sign1 )
+{
+	if ( sign0 > 0 ) return sign1 > 0 ? a + b : a - b;
+	return sign1 > 0 ? b - a : -a - b;
+}
+
+static size_t source_elems
+     (
+       dim_t panel_dim,
+       dim_t k,
+       inc_t rs,
+       inc_t cs
+     )
+{
+	if ( panel_dim == 0 || k == 0 ) return 1;
+
+	return ( size_t )( panel_dim - 1 ) * ( size_t )rs +
+	       ( size_t )( k - 1 ) * ( size_t )cs + 1;
+}
+
+static int test_s
+     (
+       dim_t   panel_dim,
+       dim_t   k,
+       int     transposed,
+       int8_t  sign0,
+       int8_t  sign1,
+       size_t* tested_elements
+     )
+{
+	const inc_t rs = transposed ? k + 5 : 1;
+	const inc_t cs = transposed ? 1 : panel_dim + 3;
+	const size_t nsrc = source_elems( panel_dim, k, rs, cs );
+	const size_t np = ( size_t )panel_dim * ( size_t )k;
+	const float guard = 0x1.3a5p+17f;
+	float* x0 = malloc( nsrc * sizeof *x0 );
+	float* x1 = malloc( nsrc * sizeof *x1 );
+	float* raw = malloc( ( np + 2 * GUARD_ELEMS ) * sizeof *raw );
+	if ( x0 == NULL || x1 == NULL || raw == NULL )
+	{
+		free( x0 ); free( x1 ); free( raw );
+		fputs( "float allocation failed\n", stderr );
+		return 1;
+	}
+
+	for ( size_t i = 0; i < nsrc; ++i )
+	{
+		x0[i] = sf( i, 0 );
+		x1[i] = sf( i, 1 );
+	}
+	for ( size_t i = 0; i < np + 2 * GUARD_ELEMS; ++i ) raw[i] = guard;
+
+	float* const p = raw + GUARD_ELEMS;
+	const bool accepted = bls_sc_packm_2src_armv8a
+	(
+	  BLIS_FLOAT, panel_dim, k, panel_dim, x0, x1, rs, cs,
+	  sign0, sign1, p
+	);
+
+	int fail = 0;
+	if ( !accepted )
+	{
+		fprintf
+		(
+		  stderr,
+		  "float unexpectedly rejected: panel=%lld k=%lld layout=%s signs=%+d,%+d\n",
+		  ( long long )panel_dim, ( long long )k,
+		  transposed ? "cs1" : "rs1", ( int )sign0, ( int )sign1
+		);
+		fail = 1;
+	}
+	else
+	{
+		for ( dim_t l = 0; l < k; ++l )
+		for ( dim_t i = 0; i < panel_dim; ++i )
+		{
+			const float want = combine_s
+			(
+			  x0[( size_t )i * ( size_t )rs + ( size_t )l * ( size_t )cs],
+			  x1[( size_t )i * ( size_t )rs + ( size_t )l * ( size_t )cs],
+			  sign0, sign1
+			);
+			const size_t pi = ( size_t )l * ( size_t )panel_dim + ( size_t )i;
+			if ( memcmp( &p[pi], &want, sizeof want ) != 0 )
+			{
+				fprintf
+				(
+				  stderr,
+				  "float mismatch: panel=%lld k=%lld layout=%s signs=%+d,%+d "
+				  "l=%lld i=%lld got=%a want=%a\n",
+				  ( long long )panel_dim, ( long long )k,
+				  transposed ? "cs1" : "rs1", ( int )sign0, ( int )sign1,
+				  ( long long )l, ( long long )i, ( double )p[pi], ( double )want
+				);
+				fail = 1;
+				goto check_float_guards;
+			}
+		}
+	}
+
+check_float_guards:
+	for ( size_t i = 0; i < GUARD_ELEMS; ++i )
+		if ( raw[i] != guard || raw[GUARD_ELEMS + np + i] != guard )
+		{
+			fprintf
+			(
+			  stderr,
+			  "float guard overwritten: panel=%lld k=%lld layout=%s signs=%+d,%+d\n",
+			  ( long long )panel_dim, ( long long )k,
+			  transposed ? "cs1" : "rs1", ( int )sign0, ( int )sign1
+			);
+			fail = 1;
+			break;
+		}
+
+	*tested_elements += np;
+	free( x0 ); free( x1 ); free( raw );
+	return fail;
+}
+
+static int test_d
+     (
+       dim_t   panel_dim,
+       dim_t   k,
+       int     transposed,
+       int8_t  sign0,
+       int8_t  sign1,
+       size_t* tested_elements
+     )
+{
+	const inc_t rs = transposed ? k + 5 : 1;
+	const inc_t cs = transposed ? 1 : panel_dim + 3;
+	const size_t nsrc = source_elems( panel_dim, k, rs, cs );
+	const size_t np = ( size_t )panel_dim * ( size_t )k;
+	const double guard = 0x1.3a5p+117;
+	double* x0 = malloc( nsrc * sizeof *x0 );
+	double* x1 = malloc( nsrc * sizeof *x1 );
+	double* raw = malloc( ( np + 2 * GUARD_ELEMS ) * sizeof *raw );
+	if ( x0 == NULL || x1 == NULL || raw == NULL )
+	{
+		free( x0 ); free( x1 ); free( raw );
+		fputs( "double allocation failed\n", stderr );
+		return 1;
+	}
+
+	for ( size_t i = 0; i < nsrc; ++i )
+	{
+		x0[i] = df( i, 0 );
+		x1[i] = df( i, 1 );
+	}
+	for ( size_t i = 0; i < np + 2 * GUARD_ELEMS; ++i ) raw[i] = guard;
+
+	double* const p = raw + GUARD_ELEMS;
+	const bool accepted = bls_sc_packm_2src_armv8a
+	(
+	  BLIS_DOUBLE, panel_dim, k, panel_dim, x0, x1, rs, cs,
+	  sign0, sign1, p
+	);
+
+	int fail = 0;
+	if ( !accepted )
+	{
+		fprintf
+		(
+		  stderr,
+		  "double unexpectedly rejected: panel=%lld k=%lld layout=%s signs=%+d,%+d\n",
+		  ( long long )panel_dim, ( long long )k,
+		  transposed ? "cs1" : "rs1", ( int )sign0, ( int )sign1
+		);
+		fail = 1;
+	}
+	else
+	{
+		for ( dim_t l = 0; l < k; ++l )
+		for ( dim_t i = 0; i < panel_dim; ++i )
+		{
+			const double want = combine_d
+			(
+			  x0[( size_t )i * ( size_t )rs + ( size_t )l * ( size_t )cs],
+			  x1[( size_t )i * ( size_t )rs + ( size_t )l * ( size_t )cs],
+			  sign0, sign1
+			);
+			const size_t pi = ( size_t )l * ( size_t )panel_dim + ( size_t )i;
+			if ( memcmp( &p[pi], &want, sizeof want ) != 0 )
+			{
+				fprintf
+				(
+				  stderr,
+				  "double mismatch: panel=%lld k=%lld layout=%s signs=%+d,%+d "
+				  "l=%lld i=%lld got=%a want=%a\n",
+				  ( long long )panel_dim, ( long long )k,
+				  transposed ? "cs1" : "rs1", ( int )sign0, ( int )sign1,
+				  ( long long )l, ( long long )i, p[pi], want
+				);
+				fail = 1;
+				goto check_double_guards;
+			}
+		}
+	}
+
+check_double_guards:
+	for ( size_t i = 0; i < GUARD_ELEMS; ++i )
+		if ( raw[i] != guard || raw[GUARD_ELEMS + np + i] != guard )
+		{
+			fprintf
+			(
+			  stderr,
+			  "double guard overwritten: panel=%lld k=%lld layout=%s signs=%+d,%+d\n",
+			  ( long long )panel_dim, ( long long )k,
+			  transposed ? "cs1" : "rs1", ( int )sign0, ( int )sign1
+			);
+			fail = 1;
+			break;
+		}
+
+	*tested_elements += np;
+	free( x0 ); free( x1 ); free( raw );
+	return fail;
+}
+
+static int test_pair_s
+     (
+       dim_t             panel_dim,
+       dim_t             k,
+       int               transposed,
+       const pair_form_t form[2],
+       size_t*           tested_elements
+     )
+{
+	const inc_t rs = transposed ? k + 5 : 1;
+	const inc_t cs = transposed ? 1 : panel_dim + 3;
+	const size_t nsrc = source_elems( panel_dim, k, rs, cs );
+	const size_t np = ( size_t )panel_dim * ( size_t )k;
+	const float guard[2] = { 0x1.3a5p+17f, -0x1.7b9p+19f };
+	float* shared = malloc( nsrc * sizeof *shared );
+	float* unique_data[2] =
+	{
+		malloc( nsrc * sizeof *unique_data[0] ),
+		malloc( nsrc * sizeof *unique_data[1] )
+	};
+	float* raw[2] =
+	{
+		malloc( ( np + 2 * GUARD_ELEMS ) * sizeof *raw[0] ),
+		malloc( ( np + 2 * GUARD_ELEMS ) * sizeof *raw[1] )
+	};
+	if ( shared == NULL || unique_data[0] == NULL || unique_data[1] == NULL ||
+	     raw[0] == NULL || raw[1] == NULL )
+	{
+		free( shared ); free( unique_data[0] ); free( unique_data[1] );
+		free( raw[0] ); free( raw[1] );
+		fputs( "float pair allocation failed\n", stderr );
+		return 1;
+	}
+
+	for ( size_t i = 0; i < nsrc; ++i )
+	{
+		shared[i] = sf( i, 2 );
+		unique_data[0][i] = sf( i, 3 );
+		unique_data[1][i] = sf( i, 4 );
+	}
+	for ( dim_t f = 0; f < 2; ++f )
+		for ( size_t i = 0; i < np + 2 * GUARD_ELEMS; ++i )
+			raw[f][i] = guard[f];
+
+	const void* unique[2] =
+	{
+		form[0].unique_sign == 0 ? NULL : unique_data[0],
+		form[1].unique_sign == 0 ? NULL : unique_data[1]
+	};
+	const int8_t shared_sign[2] =
+	{
+		form[0].shared_sign, form[1].shared_sign
+	};
+	const int8_t unique_sign[2] =
+	{
+		form[0].unique_sign, form[1].unique_sign
+	};
+	void* p[2] = { raw[0] + GUARD_ELEMS, raw[1] + GUARD_ELEMS };
+	const bool accepted = bls_sc_packm_pair_armv8a
+	(
+	  BLIS_FLOAT, panel_dim, k, panel_dim, shared, unique, rs, cs,
+	  shared_sign, unique_sign, p
+	);
+
+	int fail = 0;
+	if ( !accepted )
+	{
+		fprintf
+		(
+		  stderr,
+		  "float pair unexpectedly rejected: panel=%lld k=%lld layout=%s "
+		  "forms=(%+d,%+d),(%+d,%+d)\n",
+		  ( long long )panel_dim, ( long long )k,
+		  transposed ? "cs1" : "rs1",
+		  ( int )form[0].shared_sign, ( int )form[0].unique_sign,
+		  ( int )form[1].shared_sign, ( int )form[1].unique_sign
+		);
+		fail = 1;
+	}
+	else
+	{
+		for ( dim_t f = 0; f < 2; ++f )
+		for ( dim_t l = 0; l < k; ++l )
+		for ( dim_t i = 0; i < panel_dim; ++i )
+		{
+			const size_t si = ( size_t )i * ( size_t )rs +
+			                  ( size_t )l * ( size_t )cs;
+			const float want = form[f].unique_sign == 0
+			                 ? ( form[f].shared_sign > 0
+			                     ? shared[si] : -shared[si] )
+			                 : combine_s( shared[si], unique_data[f][si],
+			                              form[f].shared_sign,
+			                              form[f].unique_sign );
+			const size_t pi = ( size_t )l * ( size_t )panel_dim + ( size_t )i;
+			const float got = ( ( float* )p[f] )[pi];
+			if ( memcmp( &got, &want, sizeof want ) != 0 )
+			{
+				fprintf
+				(
+				  stderr,
+				  "float pair mismatch: panel=%lld k=%lld layout=%s f=%lld "
+				  "form=(%+d,%+d) l=%lld i=%lld got=%a want=%a\n",
+				  ( long long )panel_dim, ( long long )k,
+				  transposed ? "cs1" : "rs1", ( long long )f,
+				  ( int )form[f].shared_sign, ( int )form[f].unique_sign,
+				  ( long long )l, ( long long )i, ( double )got, ( double )want
+				);
+				fail = 1;
+				goto check_float_pair_guards;
+			}
+		}
+	}
+
+check_float_pair_guards:
+	for ( dim_t f = 0; f < 2; ++f )
+	for ( size_t i = 0; i < GUARD_ELEMS; ++i )
+		if ( raw[f][i] != guard[f] ||
+		     raw[f][GUARD_ELEMS + np + i] != guard[f] )
+		{
+			fprintf
+			(
+			  stderr,
+			  "float pair output %lld guard overwritten: panel=%lld k=%lld "
+			  "layout=%s forms=(%+d,%+d),(%+d,%+d)\n",
+			  ( long long )f, ( long long )panel_dim, ( long long )k,
+			  transposed ? "cs1" : "rs1",
+			  ( int )form[0].shared_sign, ( int )form[0].unique_sign,
+			  ( int )form[1].shared_sign, ( int )form[1].unique_sign
+			);
+			fail = 1;
+			goto float_pair_done;
+		}
+
+float_pair_done:
+	*tested_elements += 2 * np;
+	free( shared ); free( unique_data[0] ); free( unique_data[1] );
+	free( raw[0] ); free( raw[1] );
+	return fail;
+}
+
+static int test_pair_d
+     (
+       dim_t             panel_dim,
+       dim_t             k,
+       int               transposed,
+       const pair_form_t form[2],
+       size_t*           tested_elements
+     )
+{
+	const inc_t rs = transposed ? k + 5 : 1;
+	const inc_t cs = transposed ? 1 : panel_dim + 3;
+	const size_t nsrc = source_elems( panel_dim, k, rs, cs );
+	const size_t np = ( size_t )panel_dim * ( size_t )k;
+	const double guard[2] = { 0x1.3a5p+117, -0x1.7b9p+119 };
+	double* shared = malloc( nsrc * sizeof *shared );
+	double* unique_data[2] =
+	{
+		malloc( nsrc * sizeof *unique_data[0] ),
+		malloc( nsrc * sizeof *unique_data[1] )
+	};
+	double* raw[2] =
+	{
+		malloc( ( np + 2 * GUARD_ELEMS ) * sizeof *raw[0] ),
+		malloc( ( np + 2 * GUARD_ELEMS ) * sizeof *raw[1] )
+	};
+	if ( shared == NULL || unique_data[0] == NULL || unique_data[1] == NULL ||
+	     raw[0] == NULL || raw[1] == NULL )
+	{
+		free( shared ); free( unique_data[0] ); free( unique_data[1] );
+		free( raw[0] ); free( raw[1] );
+		fputs( "double pair allocation failed\n", stderr );
+		return 1;
+	}
+
+	for ( size_t i = 0; i < nsrc; ++i )
+	{
+		shared[i] = df( i, 2 );
+		unique_data[0][i] = df( i, 3 );
+		unique_data[1][i] = df( i, 4 );
+	}
+	for ( dim_t f = 0; f < 2; ++f )
+		for ( size_t i = 0; i < np + 2 * GUARD_ELEMS; ++i )
+			raw[f][i] = guard[f];
+
+	const void* unique[2] =
+	{
+		form[0].unique_sign == 0 ? NULL : unique_data[0],
+		form[1].unique_sign == 0 ? NULL : unique_data[1]
+	};
+	const int8_t shared_sign[2] =
+	{
+		form[0].shared_sign, form[1].shared_sign
+	};
+	const int8_t unique_sign[2] =
+	{
+		form[0].unique_sign, form[1].unique_sign
+	};
+	void* p[2] = { raw[0] + GUARD_ELEMS, raw[1] + GUARD_ELEMS };
+	const bool accepted = bls_sc_packm_pair_armv8a
+	(
+	  BLIS_DOUBLE, panel_dim, k, panel_dim, shared, unique, rs, cs,
+	  shared_sign, unique_sign, p
+	);
+
+	int fail = 0;
+	if ( !accepted )
+	{
+		fprintf
+		(
+		  stderr,
+		  "double pair unexpectedly rejected: panel=%lld k=%lld layout=%s "
+		  "forms=(%+d,%+d),(%+d,%+d)\n",
+		  ( long long )panel_dim, ( long long )k,
+		  transposed ? "cs1" : "rs1",
+		  ( int )form[0].shared_sign, ( int )form[0].unique_sign,
+		  ( int )form[1].shared_sign, ( int )form[1].unique_sign
+		);
+		fail = 1;
+	}
+	else
+	{
+		for ( dim_t f = 0; f < 2; ++f )
+		for ( dim_t l = 0; l < k; ++l )
+		for ( dim_t i = 0; i < panel_dim; ++i )
+		{
+			const size_t si = ( size_t )i * ( size_t )rs +
+			                  ( size_t )l * ( size_t )cs;
+			const double want = form[f].unique_sign == 0
+			                  ? ( form[f].shared_sign > 0
+			                      ? shared[si] : -shared[si] )
+			                  : combine_d( shared[si], unique_data[f][si],
+			                               form[f].shared_sign,
+			                               form[f].unique_sign );
+			const size_t pi = ( size_t )l * ( size_t )panel_dim + ( size_t )i;
+			const double got = ( ( double* )p[f] )[pi];
+			if ( memcmp( &got, &want, sizeof want ) != 0 )
+			{
+				fprintf
+				(
+				  stderr,
+				  "double pair mismatch: panel=%lld k=%lld layout=%s f=%lld "
+				  "form=(%+d,%+d) l=%lld i=%lld got=%a want=%a\n",
+				  ( long long )panel_dim, ( long long )k,
+				  transposed ? "cs1" : "rs1", ( long long )f,
+				  ( int )form[f].shared_sign, ( int )form[f].unique_sign,
+				  ( long long )l, ( long long )i, got, want
+				);
+				fail = 1;
+				goto check_double_pair_guards;
+			}
+		}
+	}
+
+check_double_pair_guards:
+	for ( dim_t f = 0; f < 2; ++f )
+	for ( size_t i = 0; i < GUARD_ELEMS; ++i )
+		if ( raw[f][i] != guard[f] ||
+		     raw[f][GUARD_ELEMS + np + i] != guard[f] )
+		{
+			fprintf
+			(
+			  stderr,
+			  "double pair output %lld guard overwritten: panel=%lld k=%lld "
+			  "layout=%s forms=(%+d,%+d),(%+d,%+d)\n",
+			  ( long long )f, ( long long )panel_dim, ( long long )k,
+			  transposed ? "cs1" : "rs1",
+			  ( int )form[0].shared_sign, ( int )form[0].unique_sign,
+			  ( int )form[1].shared_sign, ( int )form[1].unique_sign
+			);
+			fail = 1;
+			goto double_pair_done;
+		}
+
+double_pair_done:
+	*tested_elements += 2 * np;
+	free( shared ); free( unique_data[0] ); free( unique_data[1] );
+	free( raw[0] ); free( raw[1] );
+	return fail;
+}
+
+static int expect_false
+     (
+       const char* label,
+       num_t       dt,
+       dim_t       panel_m,
+       dim_t       k,
+       dim_t       panel_dim,
+       const void* x0,
+       const void* x1,
+       inc_t       rs,
+       inc_t       cs,
+       int8_t      sign0,
+       int8_t      sign1,
+       void*       p
+     )
+{
+	if ( !bls_sc_packm_2src_armv8a
+	     (
+	       dt, panel_m, k, panel_dim, x0, x1, rs, cs,
+	       sign0, sign1, p
+	     ) )
+		return 0;
+
+	fprintf( stderr, "unsupported case accepted: %s\n", label );
+	return 1;
+}
+
+static int expect_pair_false
+     (
+       const char*       label,
+       num_t             dt,
+       dim_t             panel_m,
+       dim_t             k,
+       dim_t             panel_dim,
+       const void*       shared,
+       const void* const unique[2],
+       inc_t             rs,
+       inc_t             cs,
+       const int8_t      shared_sign[2],
+       const int8_t      unique_sign[2],
+       void* const       p[2],
+       size_t*           tested_cases
+     )
+{
+	++*tested_cases;
+	if ( !bls_sc_packm_pair_armv8a
+	     (
+	       dt, panel_m, k, panel_dim, shared, unique, rs, cs,
+	       shared_sign, unique_sign, p
+	     ) )
+		return 0;
+
+	fprintf( stderr, "unsupported paired case accepted: %s\n", label );
+	return 1;
+}
+
+static int test_rejections( size_t* tested_cases )
+{
+	float sx0[128], sx1[128], sp[128];
+	double dx0[128], dx1[128], dp[128];
+	const dim_t spds[] = { 8, 12 };
+	const dim_t dpds[] = { 6, 8 };
+	int fail = 0;
+
+	for ( size_t i = 0; i < 128; ++i )
+	{
+		sx0[i] = sf( i, 0 ); sx1[i] = sf( i, 1 ); sp[i] = sf( i, 2 );
+		dx0[i] = df( i, 0 ); dx1[i] = df( i, 1 ); dp[i] = df( i, 2 );
+	}
+
+	for ( size_t ip = 0; ip < sizeof spds / sizeof *spds; ++ip )
+	{
+		const dim_t pd = spds[ip];
+		fail |= expect_false( "float partial panel", BLIS_FLOAT,
+		                      pd - 1, 3, pd, sx0, sx1, 1, pd + 1, 1, 1, sp );
+		fail |= expect_false( "float general strides", BLIS_FLOAT,
+		                      pd, 3, pd, sx0, sx1, 2, 3, 1, 1, sp );
+		*tested_cases += 2;
+	}
+
+	for ( size_t ip = 0; ip < sizeof dpds / sizeof *dpds; ++ip )
+	{
+		const dim_t pd = dpds[ip];
+		fail |= expect_false( "double partial panel", BLIS_DOUBLE,
+		                      pd - 1, 3, pd, dx0, dx1, 1, pd + 1, 1, 1, dp );
+		fail |= expect_false( "double general strides", BLIS_DOUBLE,
+		                      pd, 3, pd, dx0, dx1, 2, 3, 1, 1, dp );
+		*tested_cases += 2;
+	}
+
+	fail |= expect_false( "float unsupported panel size", BLIS_FLOAT,
+	                      10, 3, 10, sx0, sx1, 1, 11, 1, 1, sp );
+	fail |= expect_false( "double unsupported panel size", BLIS_DOUBLE,
+	                      10, 3, 10, dx0, dx1, 1, 11, 1, 1, dp );
+	fail |= expect_false( "unsupported datatype", BLIS_SCOMPLEX,
+	                      8, 3, 8, sx0, sx1, 1, 9, 1, 1, sp );
+	fail |= expect_false( "invalid first sign", BLIS_FLOAT,
+	                      8, 3, 8, sx0, sx1, 1, 9, 0, 1, sp );
+	fail |= expect_false( "invalid second sign", BLIS_DOUBLE,
+	                      8, 3, 8, dx0, dx1, 1, 9, 1, 2, dp );
+	fail |= expect_false( "null first source", BLIS_FLOAT,
+	                      8, 3, 8, NULL, sx1, 1, 9, 1, 1, sp );
+	fail |= expect_false( "null second source", BLIS_DOUBLE,
+	                      8, 3, 8, dx0, NULL, 1, 9, 1, 1, dp );
+	fail |= expect_false( "null destination", BLIS_FLOAT,
+	                      8, 3, 8, sx0, sx1, 1, 9, 1, 1, NULL );
+	*tested_cases += 8;
+
+	return fail;
+}
+
+static int test_pair_rejections( size_t* tested_cases )
+{
+	float ss[128], su0[128], su1[128], sp0[128], sp1[128];
+	double ds[128], du0[128], du1[128], dp0[128], dp1[128];
+	const void* su[2] = { su0, su1 };
+	const void* du[2] = { du0, du1 };
+	void* sp[2] = { sp0, sp1 };
+	void* dp[2] = { dp0, dp1 };
+	const int8_t shared_sign[2] = { 1, -1 };
+	const int8_t unique_sign[2] = { -1, 1 };
+	const dim_t spds[] = { 8, 12 };
+	const dim_t dpds[] = { 6, 8 };
+	int fail = 0;
+
+	for ( size_t i = 0; i < 128; ++i )
+	{
+		ss[i] = sf( i, 2 ); su0[i] = sf( i, 3 ); su1[i] = sf( i, 4 );
+		sp0[i] = sf( i, 5 ); sp1[i] = sf( i, 6 );
+		ds[i] = df( i, 2 ); du0[i] = df( i, 3 ); du1[i] = df( i, 4 );
+		dp0[i] = df( i, 5 ); dp1[i] = df( i, 6 );
+	}
+
+	for ( size_t ip = 0; ip < sizeof spds / sizeof *spds; ++ip )
+	{
+		const dim_t pd = spds[ip];
+		fail |= expect_pair_false
+		(
+		  "float partial panel", BLIS_FLOAT, pd - 1, 3, pd,
+		  ss, su, 1, pd + 1, shared_sign, unique_sign, sp, tested_cases
+		);
+		fail |= expect_pair_false
+		(
+		  "float general strides", BLIS_FLOAT, pd, 3, pd,
+		  ss, su, 2, 3, shared_sign, unique_sign, sp, tested_cases
+		);
+	}
+
+	for ( size_t ip = 0; ip < sizeof dpds / sizeof *dpds; ++ip )
+	{
+		const dim_t pd = dpds[ip];
+		fail |= expect_pair_false
+		(
+		  "double partial panel", BLIS_DOUBLE, pd - 1, 3, pd,
+		  ds, du, 1, pd + 1, shared_sign, unique_sign, dp, tested_cases
+		);
+		fail |= expect_pair_false
+		(
+		  "double general strides", BLIS_DOUBLE, pd, 3, pd,
+		  ds, du, 2, 3, shared_sign, unique_sign, dp, tested_cases
+		);
+	}
+
+	fail |= expect_pair_false
+	(
+	  "float unsupported panel size", BLIS_FLOAT, 10, 3, 10,
+	  ss, su, 1, 11, shared_sign, unique_sign, sp, tested_cases
+	);
+	fail |= expect_pair_false
+	(
+	  "double unsupported panel size", BLIS_DOUBLE, 10, 3, 10,
+	  ds, du, 1, 11, shared_sign, unique_sign, dp, tested_cases
+	);
+	fail |= expect_pair_false
+	(
+	  "unsupported paired datatype", BLIS_SCOMPLEX, 8, 3, 8,
+	  ss, su, 1, 9, shared_sign, unique_sign, sp, tested_cases
+	);
+	fail |= expect_pair_false
+	(
+	  "null unique descriptor", BLIS_FLOAT, 8, 3, 8,
+	  ss, NULL, 1, 9, shared_sign, unique_sign, sp, tested_cases
+	);
+	fail |= expect_pair_false
+	(
+	  "null shared-sign descriptor", BLIS_FLOAT, 8, 3, 8,
+	  ss, su, 1, 9, NULL, unique_sign, sp, tested_cases
+	);
+	fail |= expect_pair_false
+	(
+	  "null unique-sign descriptor", BLIS_FLOAT, 8, 3, 8,
+	  ss, su, 1, 9, shared_sign, NULL, sp, tested_cases
+	);
+	fail |= expect_pair_false
+	(
+	  "null output descriptor", BLIS_FLOAT, 8, 3, 8,
+	  ss, su, 1, 9, shared_sign, unique_sign, NULL, tested_cases
+	);
+
+	{
+		const int8_t bad_shared_sign[2] = { 0, 1 };
+		fail |= expect_pair_false
+		(
+		  "invalid paired shared sign", BLIS_FLOAT, 8, 3, 8,
+		  ss, su, 1, 9, bad_shared_sign, unique_sign, sp, tested_cases
+		);
+	}
+	{
+		const void* missing_unique[2] = { NULL, su1 };
+		fail |= expect_pair_false
+		(
+		  "missing active unique source", BLIS_FLOAT, 8, 3, 8,
+		  ss, missing_unique, 1, 9, shared_sign, unique_sign, sp, tested_cases
+		);
+	}
+	{
+		const int8_t zero_active_sign[2] = { 0, 1 };
+		fail |= expect_pair_false
+		(
+		  "zero sign with nonnull unique", BLIS_FLOAT, 8, 3, 8,
+		  ss, su, 1, 9, shared_sign, zero_active_sign, sp, tested_cases
+		);
+	}
+	{
+		const int8_t bad_unique_sign[2] = { 2, 1 };
+		fail |= expect_pair_false
+		(
+		  "invalid paired unique sign", BLIS_DOUBLE, 8, 3, 8,
+		  ds, du, 1, 9, shared_sign, bad_unique_sign, dp, tested_cases
+		);
+	}
+	{
+		void* missing_output0[2] = { NULL, sp1 };
+		void* missing_output1[2] = { sp0, NULL };
+		fail |= expect_pair_false
+		(
+		  "null first output", BLIS_FLOAT, 8, 3, 8,
+		  ss, su, 1, 9, shared_sign, unique_sign,
+		  missing_output0, tested_cases
+		);
+		fail |= expect_pair_false
+		(
+		  "null second output", BLIS_FLOAT, 8, 3, 8,
+		  ss, su, 1, 9, shared_sign, unique_sign,
+		  missing_output1, tested_cases
+		);
+	}
+	fail |= expect_pair_false
+	(
+	  "null shared source", BLIS_DOUBLE, 8, 3, 8,
+	  NULL, du, 1, 9, shared_sign, unique_sign, dp, tested_cases
+	);
+	fail |= expect_pair_false
+	(
+	  "negative paired k", BLIS_FLOAT, 8, -1, 8,
+	  ss, su, 1, 9, shared_sign, unique_sign, sp, tested_cases
+	);
+
+	return fail;
+}
+
+int main( void )
+{
+#if !defined(__aarch64__)
+	puts( "two-source armv8a packm: SKIP (requires AArch64)" );
+	return 0;
+#else
+	const dim_t spds[] = { 8, 12 };
+	const dim_t sks[] = { 0, 1, 3, 4, 5, 9 };
+	const dim_t dpds[] = { 6, 8 };
+	const dim_t dks[] = { 0, 1, 2, 3, 7 };
+	const int8_t signs[][2] = { { 1, 1 }, { 1, -1 },
+	                              {-1, 1 }, {-1, -1 } };
+	const pair_form_t forms[] =
+	{
+		{ 1, 1 }, { 1, -1 }, {-1, 1 }, {-1, -1 },
+		{ 1, 0 }, {-1, 0 }
+	};
+	int fail = 0;
+	size_t tested_cases = 0;
+	size_t tested_elements = 0;
+
+	for ( size_t ip = 0; ip < sizeof spds / sizeof *spds; ++ip )
+	for ( size_t ik = 0; ik < sizeof sks / sizeof *sks; ++ik )
+	for ( size_t is = 0; is < sizeof signs / sizeof *signs; ++is )
+	for ( int transposed = 0; transposed <= 1; ++transposed )
+	{
+		fail |= test_s( spds[ip], sks[ik], transposed,
+		                signs[is][0], signs[is][1], &tested_elements );
+		++tested_cases;
+	}
+
+	for ( size_t ip = 0; ip < sizeof dpds / sizeof *dpds; ++ip )
+	for ( size_t ik = 0; ik < sizeof dks / sizeof *dks; ++ik )
+	for ( size_t is = 0; is < sizeof signs / sizeof *signs; ++is )
+	for ( int transposed = 0; transposed <= 1; ++transposed )
+	{
+		fail |= test_d( dpds[ip], dks[ik], transposed,
+		                signs[is][0], signs[is][1], &tested_elements );
+		++tested_cases;
+	}
+
+	for ( size_t ip = 0; ip < sizeof spds / sizeof *spds; ++ip )
+	for ( size_t ik = 0; ik < sizeof sks / sizeof *sks; ++ik )
+	for ( size_t i0 = 0; i0 < sizeof forms / sizeof *forms; ++i0 )
+	for ( size_t i1 = 0; i1 < sizeof forms / sizeof *forms; ++i1 )
+	for ( int transposed = 0; transposed <= 1; ++transposed )
+	{
+		const pair_form_t pair[2] = { forms[i0], forms[i1] };
+		fail |= test_pair_s( spds[ip], sks[ik], transposed,
+		                     pair, &tested_elements );
+		++tested_cases;
+	}
+
+	for ( size_t ip = 0; ip < sizeof dpds / sizeof *dpds; ++ip )
+	for ( size_t ik = 0; ik < sizeof dks / sizeof *dks; ++ik )
+	for ( size_t i0 = 0; i0 < sizeof forms / sizeof *forms; ++i0 )
+	for ( size_t i1 = 0; i1 < sizeof forms / sizeof *forms; ++i1 )
+	for ( int transposed = 0; transposed <= 1; ++transposed )
+	{
+		const pair_form_t pair[2] = { forms[i0], forms[i1] };
+		fail |= test_pair_d( dpds[ip], dks[ik], transposed,
+		                     pair, &tested_elements );
+		++tested_cases;
+	}
+
+	fail |= test_rejections( &tested_cases );
+	fail |= test_pair_rejections( &tested_cases );
+
+	printf
+	(
+	  "armv8a linear-form packm: %s (%zu cases, %zu packed elements)\n",
+	  fail ? "FAIL" : "PASS", tested_cases, tested_elements
+	);
+	return fail;
+#endif
+}
